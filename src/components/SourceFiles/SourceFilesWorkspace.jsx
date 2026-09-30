@@ -1,29 +1,52 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { patchSourceFilesPrefs } from '../../utils/uiPreferences';
 
 export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, addToast }) {
-  
+  const fileInputRef = useRef(null);
+  const activeKeyRef = useRef(null);
+
   const handleSelectFile = useCallback(async (key, title, filters) => {
-    if (!window.electronAPI) return;
-    try {
-      const filePath = await window.electronAPI.showOpenDialog({
-        title,
-        filters
-      });
-      
-      if (filePath && onUIPrefsChange && uiPrefs) {
-        onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: filePath }));
-        addToast('success', 'File Updated', `Selected: ${filePath}`);
+    // 1. Desktop Electron mode
+    if (window.electronAPI?.showOpenDialog) {
+      try {
+        const filePath = await window.electronAPI.showOpenDialog({
+          title,
+          filters
+        });
+        
+        if (filePath && onUIPrefsChange && uiPrefs) {
+          onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: filePath }));
+          addToast?.('success', 'File Updated', `Selected: ${filePath}`);
+          return;
+        }
+      } catch (err) {
+        console.warn('Electron showOpenDialog error, falling back to browser picker:', err);
       }
-    } catch (err) {
-      addToast('error', 'Selection Failed', err.message);
+    }
+
+    // 2. Web Browser mode fallback (Netlify / standard browser)
+    activeKeyRef.current = key;
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = key === 'pmis' ? '.csv' : '.xlsx,.xls';
+      fileInputRef.current.value = ''; // Reset input
+      fileInputRef.current.click();
     }
   }, [uiPrefs, onUIPrefsChange, addToast]);
-  
+
+  const handleWebFileChange = (e) => {
+    const file = e.target.files?.[0];
+    const key = activeKeyRef.current;
+    if (file && key && onUIPrefsChange && uiPrefs) {
+      const displayPath = file.name;
+      onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: displayPath }));
+      addToast?.('success', 'File Selected', `Selected file: ${displayPath}`);
+    }
+  };
+
   const handleResetFile = useCallback((key) => {
     if (onUIPrefsChange && uiPrefs) {
       onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: null }));
-      addToast('info', 'File Reset', 'Restored default file path.');
+      addToast?.('info', 'File Reset', 'Restored default file path.');
     }
   }, [uiPrefs, onUIPrefsChange, addToast]);
 
@@ -33,6 +56,14 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
 
   return (
     <div className="workspace">
+      {/* Hidden file input for web browser fallback */}
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        style={{ display: 'none' }} 
+        onChange={handleWebFileChange} 
+      />
+
       <div className="workspace__toolbar">
         <div className="workspace__title">Source Files Configuration</div>
       </div>
@@ -61,7 +92,7 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
                 )}
                 <button 
                   className="btn btn--primary" 
-                  onClick={() => handleSelectFile('repaired', 'Select Repaired Excel File', [{ name: 'Excel', extensions: ['xlsx'] }])}
+                  onClick={() => handleSelectFile('repaired', 'Select Repaired Excel File', [{ name: 'Excel', extensions: ['xlsx', 'xls'] }])}
                 >
                   Change File
                 </button>
@@ -85,7 +116,7 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
                 )}
                 <button 
                   className="btn btn--primary" 
-                  onClick={() => handleSelectFile('inservice', 'Select In-Service Excel File', [{ name: 'Excel', extensions: ['xlsx'] }])}
+                  onClick={() => handleSelectFile('inservice', 'Select In-Service Excel File', [{ name: 'Excel', extensions: ['xlsx', 'xls'] }])}
                 >
                   Change File
                 </button>
