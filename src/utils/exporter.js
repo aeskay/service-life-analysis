@@ -40,7 +40,20 @@ export async function exportToExcel(rows, defaultName = 'export.xlsx') {
   // Write to buffer
   const xlsxBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
 
-
+  // 1. Desktop Electron fallback if window.electronAPI is present
+  if (window.electronAPI?.showSaveDialog && window.electronAPI?.writeExcel) {
+    try {
+      const savePath = await window.electronAPI.showSaveDialog(defaultName);
+      if (!savePath) return null;
+      await window.electronAPI.writeExcel(
+        savePath,
+        Array.from(new Uint8Array(xlsxBuffer))
+      );
+      return savePath;
+    } catch (err) {
+      console.warn('Desktop save dialog failed, falling back to browser download:', err);
+    }
+  }
 
   // 2. Pure Web Browser Download
   const blob = new Blob([xlsxBuffer], {

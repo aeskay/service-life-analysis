@@ -164,6 +164,7 @@ export default function TrafficWorkspace({ addToast, uiPrefs, onUIPrefsChange })
 
   const handleRun = async () => {
     setRunning(true);
+    window.electronAPI?.onTrafficProgress(() => {});
     try {
       const customPmisPath = uiPrefs?.sourceFiles?.pmis;
 
@@ -177,7 +178,16 @@ export default function TrafficWorkspace({ addToast, uiPrefs, onUIPrefsChange })
 
       for (const mode of modes) {
         try {
-          const data = runTrafficAnalysisJS(state, mode);
+          let data = null;
+          if (window.electronAPI?.runTrafficAnalysis) {
+            try {
+              data = await window.electronAPI.runTrafficAnalysis(mode, customPmisPath);
+            } catch (_) {
+              data = runTrafficAnalysisJS(state, mode);
+            }
+          } else {
+            data = runTrafficAnalysisJS(state, mode);
+          }
 
           updatedTraffic[mode] = data;
           if (mode === trafficMode) {
@@ -197,6 +207,7 @@ export default function TrafficWorkspace({ addToast, uiPrefs, onUIPrefsChange })
       addToast('error', 'Traffic Analysis Failed', e.message || String(e));
     } finally {
       setRunning(false);
+      window.electronAPI?.offTrafficProgress();
     }
   };
 

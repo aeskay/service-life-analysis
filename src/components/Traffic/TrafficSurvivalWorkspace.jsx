@@ -17,7 +17,27 @@ export default function TrafficSurvivalWorkspace({ addToast }) {
     window.trafficSurvivalSlabCache = null;
     setIsLoading(true);
 
-    runJSFallback();
+    if (window.electronAPI?.runSurvivalAnalysisTraffic) {
+      Promise.all([
+        window.electronAPI.runSurvivalAnalysisTraffic(),
+        window.electronAPI.runSurvivalAnalysisTrafficSlab()
+      ])
+        .then(([res1, res2]) => {
+          if (res1.error || res2.error) {
+            runJSFallback();
+          } else {
+            window.trafficSurvivalCache = res1;
+            window.trafficSurvivalSlabCache = res2;
+            setData(res1);
+            setSlabData(res2);
+            setError(null);
+            setIsLoading(false);
+          }
+        })
+        .catch(() => runJSFallback());
+    } else {
+      runJSFallback();
+    }
 
     function runJSFallback() {
       import('../../utils/stateStore').then(({ loadState }) => loadState()).then(state => {

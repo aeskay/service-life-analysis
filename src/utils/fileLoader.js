@@ -26,7 +26,7 @@ export function getPMISDistributionsSync() {
   return cachedPMISMap ? cachedPMISMap.pmisDistributions : null;
 }
 
-export async function parseExcelBuffer(bufferArray) {
+async function parseExcelBuffer(bufferArray) {
   const uint8 = new Uint8Array(bufferArray);
   const workbook = XLSX.read(uint8, { type: 'array' });
 
@@ -55,20 +55,14 @@ async function loadExcelFile(key, defaultFilename, customPath) {
     return parseExcelBuffer(bufferArray);
   }
 
-
-
-  // 3. Try Firebase Firestore (raw parsed rows saved as chunks)
-  try {
-    const { getActiveProjectId, loadRawSourceFromCloud } = await import('./projectStore');
-    const projectId = getActiveProjectId();
-    if (projectId) {
-      const cloudRows = await loadRawSourceFromCloud(projectId, key);
-      if (cloudRows && cloudRows.length > 0) {
-        return cloudRows;
-      }
+  // 2. Desktop bridge fallback if running inside Electron shell
+  if (window.electronAPI?.readFileBuffer) {
+    try {
+      const bufferArray = await window.electronAPI.readFileBuffer(defaultFilename, customPath);
+      return parseExcelBuffer(bufferArray);
+    } catch (err) {
+      console.warn('Desktop bridge read failed, falling back to web fetch:', err);
     }
-  } catch (err) {
-    console.warn(`Firestore raw source download for ${key} skipped/failed:`, err.message);
   }
 
   // 3. Web fetch relative asset paths
@@ -85,11 +79,6 @@ async function loadExcelFile(key, defaultFilename, customPath) {
     try {
       const resp = await fetch(url);
       if (resp.ok) {
-        // Netlify catch-all might return 200 OK with index.html for missing assets
-        const contentType = resp.headers.get('content-type') || '';
-        if (contentType.includes('text/html')) {
-          continue; // Skip this url, it's a fallback HTML page, not an Excel file
-        }
         const bufferArray = await resp.arrayBuffer();
         return parseExcelBuffer(bufferArray);
       }
@@ -120,7 +109,13 @@ async function getPMISSource(customPath) {
     return registeredFile;
   }
 
-
+  if (window.electronAPI?.readPmisText) {
+    try {
+      return await window.electronAPI.readPmisText(customPath);
+    } catch (err) {
+      console.warn('Desktop PMIS text read failed, falling back to web fetch:', err);
+    }
+  }
 
   const candidateUrls = [
     customPath,
@@ -131,17 +126,11 @@ async function getPMISSource(customPath) {
   for (const url of candidateUrls) {
     try {
       const resp = await fetch(url, { method: 'HEAD' });
-      if (resp.ok) {
-        const contentType = resp.headers.get('content-type') || '';
-        if (!contentType.includes('text/html')) {
-          return url;
-        }
-      }
+      if (resp.ok) return url;
     } catch (_) {}
   }
 
-  // If we reach here, we didn't find PMIS.csv
-  throw new Error(`Data file "PMIS.csv" not found. Please go to Source Files workspace and upload your PMIS CSV file.`);
+  return '/raw-files/PMIS.csv';
 }
 
 /**

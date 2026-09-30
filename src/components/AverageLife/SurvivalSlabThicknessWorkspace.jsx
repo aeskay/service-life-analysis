@@ -12,7 +12,22 @@ export default function SurvivalSlabThicknessWorkspace({ addToast }) {
     window.survivalSlabDataCache = null;
     setIsLoading(true);
 
-    runJSFallback();
+    if (window.electronAPI?.runSurvivalAnalysisSlab) {
+      window.electronAPI.runSurvivalAnalysisSlab()
+        .then(res => {
+          if (res.error) {
+            runJSFallback();
+          } else {
+            window.survivalSlabDataCache = res;
+            setData(res);
+            setError(null);
+            setIsLoading(false);
+          }
+        })
+        .catch(() => runJSFallback());
+    } else {
+      runJSFallback();
+    }
 
     function runJSFallback() {
       import('../../utils/stateStore').then(({ loadState }) => loadState()).then(state => {

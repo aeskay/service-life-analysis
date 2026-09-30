@@ -66,14 +66,7 @@ function AppContent() {
 
   // ─── Auto Sync User Active Project on Auth Login ───────────────────────────
   useEffect(() => {
-    if (!currentUser) {
-      // Clear session data on sign out
-      localStorage.removeItem('service_life_app_state_v1');
-      setActiveProjectId(null);
-      setActiveProjectIdState(null);
-      setProjectKey(k => k + 1);
-      return;
-    }
+    if (!currentUser) return;
 
     let isMounted = true;
     async function syncActiveProject() {
@@ -113,7 +106,11 @@ function AppContent() {
 
   // ─── Load everything from disk on first mount ──────────────────────────────
   useEffect(() => {
-    loadUIPrefs().then(prefs => {
+    Promise.all([
+      window.electronAPI?.getPaths().catch(() => null),
+      loadUIPrefs(),
+    ]).then(([pathsData, prefs]) => {
+      if (pathsData) setPaths(pathsData);
       setUIPrefs(prefs);
       setPrefsReady(true);
     });
