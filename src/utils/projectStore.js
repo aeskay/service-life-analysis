@@ -8,13 +8,13 @@ import {
   deleteDoc, 
   query, 
   where, 
-  orderBy, 
   serverTimestamp 
 } from 'firebase/firestore';
 import { db } from '../config/firebase';
 
 const PROJECTS_COLLECTION = 'projects';
 const ACTIVE_PROJECT_KEY = 'crcp_active_project_id';
+const LOCAL_PROJECTS_KEY = 'crcp_local_projects_list';
 
 /**
  * Get the currently stored active project ID from localStorage
@@ -35,48 +35,85 @@ export function setActiveProjectId(projectId) {
 }
 
 /**
+ * Local fallback helpers
+ */
+function getLocalProjectsList() {
+  try {
+    const raw = localStorage.getItem(LOCAL_PROJECTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalProjectsList(list) {
+  localStorage.setItem(LOCAL_PROJECTS_KEY, JSON.stringify(list));
+}
+
+function saveLocalProjectState(projectId, state) {
+  localStorage.setItem(`crcp_project_state_${projectId}`, JSON.stringify(state));
+}
+
+function getLocalProjectState(projectId) {
+  try {
+    const raw = localStorage.getItem(`crcp_project_state_${projectId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch all projects for a specific user
  */
 export async function getUserProjects(uid) {
-  if (!uid) return [];
+  const localList = getLocalProjectsList();
+
+  if (!uid) return localList;
+
   try {
     const q = query(
       collection(db, PROJECTS_COLLECTION), 
       where('ownerUid', '==', uid)
     );
     const querySnapshot = await getDocs(q);
-    const projects = [];
+    const cloudProjects = [];
     querySnapshot.forEach((docSnap) => {
-      projects.push({ id: docSnap.id, ...docSnap.data() });
+      cloudProjects.push({ id: docSnap.id, ...docSnap.data() });
     });
-    // Sort in memory by updatedAt descending
-    return projects.sort((a, b) => {
-      const tA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (a.updatedAt || 0);
-      const tB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (b.updatedAt || 0);
+
+    // Merge cloud and local projects uniquely
+    const map = new Map();
+    localList.forEach(p => map.set(p.id, p));
+    cloudProjects.forEach(p => map.set(p.id, p));
+
+    const merged = Array.from(map.values());
+    return merged.sort((a, b) => {
+      const tA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (new Date(a.updatedAt || 0).getTime());
+      const tB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (new Date(b.updatedAt || 0).getTime());
       return tB - tA;
     });
   } catch (err) {
-    console.error('Error fetching user projects from Firestore:', err);
-    return [];
+    console.warn('Firestore fetch failed (using local project cache):', err);
+    return localList;
   }
 }
 
 /**
- * Create a new project in Firestore
+ * Create a new project in Firestore (with localStorage fallback)
  */
 export async function createProject(uid, name, description = '') {
-  if (!uid) throw new Error('User must be logged in to create a project.');
-  
-  const projectRef = doc(collection(db, PROJECTS_COLLECTION));
+  const projId = 'proj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+  const now = new Date().toISOString();
+
   const newProject = {
+    id: projId,
     name,
     description,
-    ownerUid: uid,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    ownerUid: uid || 'guest',
+    createdAt: now,
+    updatedAt: now,
   };
-
-  await setDoc(projectRef, newProject);
 
   const initialReconstructed = {
     processedSNs: [],
@@ -87,7 +124,7 @@ export async function createProject(uid, name, description = '') {
     pmisAvailableYears: [],
     verifiedSNs: [],
     actualEndOfLifeMap: {},
-    lastUpdated: new Date().toISOString(),
+    lastUpdated: now,
   };
 
   const initialInservice = {
@@ -99,55 +136,100 @@ export async function createProject(uid, name, description = '') {
     pmisAvailableYears: [],
     verifiedSNs: [],
     actualEndOfLifeMap: {},
-    lastUpdated: new Date().toISOString(),
+    lastUpdated: now,
   };
 
-  const initialTraffic = {};
+  const initialState = {
+    version: 1,
+    reconstructed: initialReconstructed,
+    inservice: initialInservice,
+    trafficAnalysis: {}
+  };
 
-  // Store modules as subdocuments under projects/{projectId}/modules/{moduleName}
-  await setDoc(doc(db, PROJECTS_COLLECTION, projectRef.id, 'modules', 'reconstructed'), initialReconstructed);
-  await setDoc(doc(db, PROJECTS_COLLECTION, projectRef.id, 'modules', 'inservice'), initialInservice);
-  await setDoc(doc(db, PROJECTS_COLLECTION, projectRef.id, 'modules', 'traffic'), initialTraffic);
+  // 1. Always save locally first so creation NEVER fails
+  const localList = getLocalProjectsList();
+  localList.unshift(newProject);
+  saveLocalProjectsList(localList);
+  saveLocalProjectState(projId, initialState);
 
-  return { id: projectRef.id, ...newProject };
+  // 2. Sync to Cloud Firestore if connected & authorized
+  if (uid) {
+    try {
+      const projectRef = doc(db, PROJECTS_COLLECTION, projId);
+      await setDoc(projectRef, {
+        name,
+        description,
+        ownerUid: uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      await setDoc(doc(db, PROJECTS_COLLECTION, projId, 'modules', 'reconstructed'), initialReconstructed);
+      await setDoc(doc(db, PROJECTS_COLLECTION, projId, 'modules', 'inservice'), initialInservice);
+      await setDoc(doc(db, PROJECTS_COLLECTION, projId, 'modules', 'traffic'), {});
+    } catch (cloudErr) {
+      console.warn('Firestore permission error (saved to local project cache):', cloudErr);
+    }
+  }
+
+  return newProject;
 }
 
 /**
- * Load project state from Firestore
+ * Load project state from Firestore or local fallback
  */
 export async function loadProjectStateFromCloud(projectId) {
   if (!projectId) return null;
+
+  // Try cloud load
   try {
     const projectDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId));
-    if (!projectDoc.exists()) return null;
+    if (projectDoc.exists()) {
+      const reconDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'reconstructed'));
+      const inserviceDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'inservice'));
+      const trafficDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic'));
 
-    const reconDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'reconstructed'));
-    const inserviceDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'inservice'));
-    const trafficDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic'));
-
-    return {
-      metadata: { id: projectDoc.id, ...projectDoc.data() },
-      state: {
+      const cloudState = {
         version: 1,
         reconstructed: reconDoc.exists() ? reconDoc.data() : {},
         inservice: inserviceDoc.exists() ? inserviceDoc.data() : {},
         trafficAnalysis: trafficDoc.exists() ? trafficDoc.data() : {}
-      }
-    };
+      };
+
+      saveLocalProjectState(projectId, cloudState);
+      return {
+        metadata: { id: projectDoc.id, ...projectDoc.data() },
+        state: cloudState
+      };
+    }
   } catch (err) {
-    console.error(`Error loading state for project ${projectId}:`, err);
-    return null;
+    console.warn(`Firestore read failed for project ${projectId}, loading local cache:`, err);
   }
+
+  // Local fallback
+  const localState = getLocalProjectState(projectId);
+  if (localState) {
+    return {
+      metadata: { id: projectId, name: 'Local Project' },
+      state: localState
+    };
+  }
+
+  return null;
 }
 
 /**
- * Save state to Firestore for a specific project
+ * Save state to Firestore & local fallback for a specific project
  */
 export async function saveProjectStateToCloud(projectId, state) {
   if (!projectId || !state) return;
+
+  // Always update local cache
+  saveLocalProjectState(projectId, state);
+
+  // Sync to Cloud Firestore
   try {
     const batchUpdates = [];
-    
     if (state.reconstructed) {
       batchUpdates.push(setDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'reconstructed'), state.reconstructed, { merge: true }));
     }
@@ -164,21 +246,28 @@ export async function saveProjectStateToCloud(projectId, state) {
 
     await Promise.all(batchUpdates);
   } catch (err) {
-    console.error(`Error saving state for project ${projectId} to cloud:`, err);
+    console.warn(`Firestore save skipped for ${projectId}:`, err);
   }
 }
 
 /**
- * Delete project from Firestore
+ * Delete project from Firestore & local fallback
  */
 export async function deleteProjectFromCloud(projectId) {
   if (!projectId) return;
+
+  // Local delete
+  const localList = getLocalProjectsList().filter(p => p.id !== projectId);
+  saveLocalProjectsList(localList);
+  localStorage.removeItem(`crcp_project_state_${projectId}`);
+
+  // Cloud delete
   try {
     await deleteDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'reconstructed'));
     await deleteDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'inservice'));
     await deleteDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic'));
     await deleteDoc(doc(db, PROJECTS_COLLECTION, projectId));
   } catch (err) {
-    console.error(`Error deleting project ${projectId}:`, err);
+    console.warn(`Firestore delete skipped for ${projectId}:`, err);
   }
 }
