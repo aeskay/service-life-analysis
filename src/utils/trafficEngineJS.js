@@ -111,7 +111,16 @@ export function fitBestTrafficModel(ages, esals) {
 /**
  * Pure JS calculation of traffic analysis for a given mode
  */
-export function runTrafficAnalysisJS(state, mode) {
+
+import Papa from 'papaparse';
+import { getFileFromRegistry } from './fileRegistry';
+
+function getNumber(val, defaultVal = NaN) {
+  const n = Number(val);
+  return isNaN(n) ? defaultVal : n;
+}
+
+export async function runTrafficAnalysisJS(state, mode, addToast) {
   const modeData = state[mode] || {};
   const vSNs = new Set((modeData.verifiedSNs || []).map(x => String(x).trim()));
   const rows = modeData.pmisRows && modeData.pmisRows.length > 0 ? modeData.pmisRows : (modeData.splitRows || modeData.rows || []);
@@ -123,13 +132,78 @@ export function runTrafficAnalysisJS(state, mode) {
     return { error: `No sections found for mode '${mode}' in project.` };
   }
 
+  // Fetch PMIS file
+  if (addToast) addToast('info', 'Loading PMIS...', 'Reading PMIS dataset from cache...');
+  const pmisFile = await getFileFromRegistry('pmis');
+  if (!pmisFile) {
+    throw new Error('PMIS CSV file is missing. Please select it in the Source Files tab first.');
+  }
+
+  // Extract master metadata
+  const MATCH_ID = 'SIGNED_HWY_AND_ROADBED_ID';
+  for (const m of masterRows) {
+    if (!m[MATCH_ID] && m['HIGHWAY']) m[MATCH_ID] = String(m['HIGHWAY']).trim().toUpperCase();
+    else if (m[MATCH_ID]) m[MATCH_ID] = String(m[MATCH_ID]).trim().toUpperCase();
+
+    let mStart = getNumber(m['BEGINNING_TRM_NUMBER']) + getNumber(m['BEGINNING_TRM_DISPLACEMENT']);
+    if (isNaN(mStart)) mStart = getNumber(m['OLD_BEGIN_REF']);
+    if (isNaN(mStart)) mStart = getNumber(m['BEGIN_REF']);
+    m.M_START = mStart;
+
+    let mEnd = getNumber(m['ENDING_TRM_NUMBER']) + getNumber(m['ENDING_TRM_DISPLACEMENT']);
+    if (isNaN(mEnd)) mEnd = getNumber(m['OLD_END_REF']);
+    if (isNaN(mEnd)) mEnd = getNumber(m['END_REF']);
+    m.M_END = mEnd;
+  }
+
+  // Parse PMIS file efficiently
+  const pmisLookup = {}; // group by highway ID
+  
+  if (addToast) addToast('info', 'Parsing PMIS...', 'Scanning PMIS dataset to build cross-references...');
+  await new Promise((resolve, reject) => {
+    Papa.parse(pmisFile, {
+      header: true,
+      skipEmptyLines: true,
+      step: function(results) {
+        const r = results.data;
+        const hwyId = String(r[MATCH_ID] || '').trim().toUpperCase();
+        if (!hwyId) return;
+
+        const pStart = getNumber(r['BEGINNING_TRM_NUMBER']) + getNumber(r['BEGINNING_TRM_DISPLACEMENT']);
+        const pEnd = getNumber(r['ENDING_TRM_NUMBER']) + getNumber(r['ENDING_TRM_DISPLACEMENT']);
+        if (isNaN(pStart) || isNaN(pEnd)) return;
+
+        const lanes = getNumber(r['NUMBER_THRU_LANES'], 2);
+        const f = (lanes <= 2) ? 1.0 : (lanes <= 3 ? 0.7 : 0.6);
+        const aadt = getNumber(r['AADT_CURRENT'], 0);
+        const truck = getNumber(r['TRUCK_AADT_PCT'], 0);
+        const calcEsal = aadt * 365 * (truck / 100) * 1.2 * f;
+        if (isNaN(calcEsal) || calcEsal <= 0) return;
+
+        const fy = getNumber(r['FISCAL_YEAR']);
+        if (isNaN(fy)) return;
+
+        if (!pmisLookup[hwyId]) pmisLookup[hwyId] = [];
+        pmisLookup[hwyId].push({ P_START: pStart, P_END: pEnd, CALC_ESAL: calcEsal, FISCAL_YEAR: fy });
+      },
+      complete: function() {
+        resolve();
+      },
+      error: function(err) {
+        reject(err);
+      }
+    });
+  });
+
+  if (addToast) addToast('info', 'Analyzing Traffic...', 'Running ESAL regressions on verified sections...');
+
   const results = [];
   let globalMaxAge = 0;
+  const currentYear = new Date().getFullYear();
 
   for (const row of masterRows) {
     const yc = Number(row['Year Constructed'] || row['CONSTRUCTION_YEAR'] || row['CONSTRUCTION_YEAR'] || 0);
     let maxAge = 0;
-    const currentYear = new Date().getFullYear();
 
     if (mode === 'reconstructed') {
       const eolMap = modeData.actualEndOfLifeMap || {};
@@ -146,47 +220,83 @@ export function runTrafficAnalysisJS(state, mode) {
         maxAge = Math.max(0, Math.floor(currentYear - yc));
       }
     }
-
     if (maxAge > globalMaxAge) globalMaxAge = maxAge;
-
-    const rowCopy = { ...row, TEMP_MAX_AGE: maxAge };
-    results.push(rowCopy);
+    
+    row.TEMP_MAX_AGE = maxAge;
+    row.CONSTRUCTION_YEAR = yc;
   }
 
-  // Process sections with linear/cagr models
-  const processedResults = results.map(r => {
-    const yc = Number(r['Year Constructed'] || r['CONSTRUCTION_YEAR'] || 0);
-    const maxAge = r.TEMP_MAX_AGE || 0;
-    
-    // Default estimated ESAL base: ~150,000 to 500,000 ESALs per year depending on lanes
-    const baseAadt = Number(r['AADT_CURRENT'] || r['AADT'] || 15000);
-    const truckPct = Number(r['TRUCK_AADT_PCT'] || 12);
-    const calculatedAnnualEsal = Math.max(365, baseAadt * 365 * (truckPct / 100) * 0.6);
+  // Regression match
+  for (const row of masterRows) {
+    const maxAge = row.TEMP_MAX_AGE || 0;
+    const yc = row.CONSTRUCTION_YEAR || 0;
+    const hwyId = row[MATCH_ID];
+    const mStart = row.M_START;
+    const mEnd = row.M_END;
 
-    const dummyAges = [0, 5, 10, 15, 20].filter(a => a <= maxAge);
-    if (dummyAges.length === 0) dummyAges.push(0);
-    const dummyEsals = dummyAges.map(a => calculatedAnnualEsal * (1 + a * 0.02));
+    let eqType = "NIL", eqStr = "No PMIS match", cumEsal = 0;
+    const rowActualAges = {};
 
-    const model = fitBestTrafficModel(dummyAges, dummyEsals);
+    if (yc > 0 && hwyId && !isNaN(mStart) && !isNaN(mEnd)) {
+      const pmisData = pmisLookup[hwyId] || [];
+      const allHistAges = {};
 
-    let cumEsal = 0;
-    for (let a = 0; a <= maxAge; a++) {
-      const colName = `AGE_${a}`;
-      const val = Math.max(365, model.predict(a));
-      r[colName] = { v: Math.round(val), actual: false };
-      cumEsal += val;
+      for (let yr = 1996; yr <= currentYear; yr++) {
+        const age = yr - yc;
+        const matches = pmisData.filter(p => p.FISCAL_YEAR === yr && p.P_START < mEnd + 0.1 && p.P_END > mStart - 0.1);
+        if (matches.length > 0) {
+          let sumWeight = 0, sumEsalW = 0;
+          for (const m of matches) {
+            const w = Math.max(0, Math.min(m.P_END, mEnd) - Math.max(m.P_START, mStart));
+            sumWeight += w;
+            sumEsalW += m.CALC_ESAL * w;
+          }
+          const avgEsal = sumWeight > 0 ? (sumEsalW / sumWeight) : (matches.reduce((a,b)=>a+b.CALC_ESAL,0)/matches.length);
+          
+          if (!isNaN(avgEsal)) {
+            allHistAges[age] = avgEsal;
+            if (age >= 0) rowActualAges[age] = avgEsal;
+          }
+        }
+      }
+
+      const sortedAges = Object.keys(allHistAges).map(Number).sort((a,b)=>a-b);
+      if (sortedAges.length > 0) {
+        const kEsals = sortedAges.map(a => allHistAges[a]);
+        const model = fitBestTrafficModel(sortedAges, kEsals);
+        eqType = model.type;
+        eqStr = model.equation;
+        
+        for (let a = 0; a <= maxAge; a++) {
+          const colName = `AGE_${a}`;
+          let val = 0;
+          if (rowActualAges[a] !== undefined) {
+            val = rowActualAges[a];
+            row[colName] = { v: val, actual: true };
+          } else {
+            val = Math.max(365, model.predict(a));
+            row[colName] = { v: val, actual: false };
+          }
+          cumEsal += val;
+        }
+      } else {
+        eqStr = "No PMIS match";
+      }
+    } else {
+      eqStr = yc > 0 ? "Invalid Limits" : "No Construction Year";
     }
 
-    r['EQUATION_TYPE'] = model.type;
-    r['EQUATION'] = model.equation;
-    r['CUMULATIVE_ESAL'] = Math.round(cumEsal);
+    row['EQUATION_TYPE'] = eqType;
+    row['EQUATION'] = eqStr;
+    row['CUMULATIVE_ESAL'] = Math.round(cumEsal);
+    results.push(row);
+  }
 
-    return r;
-  });
+  if (addToast) addToast('success', 'Traffic Analysis Complete', `Successfully processed ${results.length} sections for ${mode} mode.`);
 
   return {
     success: true,
-    results: processedResults,
+    results,
     global_max_age: globalMaxAge
   };
 }

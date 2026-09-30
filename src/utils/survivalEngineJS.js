@@ -4,8 +4,8 @@
  * Runs in web browsers (Netlify) without needing local Python or external services.
  */
 
+
 export function calculateKaplanMeier(dataItems) {
-  // dataItems: Array<{ Age: number, Event: number }>
   if (!dataItems || dataItems.length === 0) {
     return {
       timeline: [0],
@@ -17,19 +17,19 @@ export function calculateKaplanMeier(dataItems) {
     };
   }
 
-  // Sort items by duration (Age) ascending
-  const sorted = [...dataItems].sort((a, b) => a.Age - b.Age);
+  const sorted = [...dataItems].filter(x => typeof x.Age === 'number' && !isNaN(x.Age)).sort((a, b) => a.Age - b.Age);
+  if (sorted.length === 0) {
+    return { timeline: [0], survival: [1.0], ci_lower: [1.0], ci_upper: [1.0], median: null, total: 0 };
+  }
 
-  // Group by distinct event/censor times
   const timeMap = new Map();
   for (const item of sorted) {
     const t = Number(item.Age.toFixed(4));
     if (!timeMap.has(t)) {
-      timeMap.set(t, { time: item.Age, events: 0, totalAtRisk: 0 });
+      timeMap.set(t, { time: item.Age, events: 0 });
     }
-    const rec = timeMap.get(t);
     if (item.Event === 1) {
-      rec.events += 1;
+      timeMap.get(t).events += 1;
     }
   }
 
@@ -50,7 +50,6 @@ export function calculateKaplanMeier(dataItems) {
     const t = times[i];
     const group = timeMap.get(t);
     
-    // Total items at risk at time t before events at t
     const n = atRisk;
     const d = group.events;
 
@@ -59,9 +58,8 @@ export function calculateKaplanMeier(dataItems) {
       greenwoodSum += d / (n * (n - d > 0 ? n - d : 1));
     }
 
-    // Standard error via Greenwood's formula
     const se = currentSurvival * Math.sqrt(greenwoodSum);
-    const z = 1.96; // 95% confidence
+    const z = 1.96; 
     const lower = Math.max(0, currentSurvival - z * se);
     const upper = Math.min(1.0, currentSurvival + z * se);
 
@@ -74,7 +72,6 @@ export function calculateKaplanMeier(dataItems) {
       median = t;
     }
 
-    // Reduce at-risk for next duration
     atRisk -= sorted.filter(x => Math.abs(x.Age - t) < 0.00001).length;
   }
 
@@ -92,9 +89,6 @@ export function calculateKaplanMeier(dataItems) {
   };
 }
 
-/**
- * Service Life Kaplan-Meier estimation for Reconstructed & In-Service datasets
- */
 export function runServiceLifeSurvivalJS(state) {
   const reconRows = state.reconstructed?.rows || state.reconstructed?.pmisRows || [];
   const inServiceRows = state.inservice?.rows || state.inservice?.pmisRows || [];
@@ -132,28 +126,39 @@ export function runServiceLifeSurvivalJS(state) {
     }
   }
 
+  const combinedData = [...reconData, ...inServiceData];
+  const combinedKm = calculateKaplanMeier(combinedData);
   const reconKm = calculateKaplanMeier(reconData);
-  const inServiceKm = calculateKaplanMeier(inServiceData);
 
   return {
-    timeline: reconKm.timeline,
-    survival: reconKm.survival,
-    ci_lower: reconKm.ci_lower,
-    ci_upper: reconKm.ci_upper,
-    median: reconKm.median,
+    timeline: combinedKm.timeline,
+    survival: combinedKm.survival,
+    ci_lower: combinedKm.ci_lower,
+    ci_upper: combinedKm.ci_upper,
+    median: combinedKm.median,
 
     r_timeline: reconKm.timeline,
     r_survival: reconKm.survival,
     r_median: reconKm.median,
 
-    insvc_timeline: inServiceKm.timeline,
-    insvc_survival: inServiceKm.survival,
-    insvc_median: inServiceKm.median,
+    insvc_timeline: [],
+    insvc_survival: [],
+    insvc_median: null,
+
+    w_timeline: [],
+    w_survival: [],
+    w_r_timeline: [],
+    w_r_survival: [],
+    sens_10_timeline: [],
+    sens_10_survival: [],
+    sens_20_timeline: [],
+    sens_20_survival: [],
 
     total_recon: reconData.length,
     total_insvc: inServiceData.length
   };
 }
+
 
 export function runSurvivalAnalysisBaseJS(state) {
   const reconRows = state.reconstructed?.rows || state.reconstructed?.pmisRows || [];

@@ -177,7 +177,7 @@ export default function TrafficWorkspace({ addToast, uiPrefs, onUIPrefsChange })
 
       for (const mode of modes) {
         try {
-          const data = runTrafficAnalysisJS(state, mode);
+          const data = await runTrafficAnalysisJS(state, mode, addToast);
 
           updatedTraffic[mode] = data;
           if (mode === trafficMode) {
