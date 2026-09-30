@@ -7,23 +7,7 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
   const activeKeyRef = useRef(null);
 
   const handleSelectFile = useCallback(async (key, title, filters) => {
-    // 1. Desktop Electron mode
-    if (window.electronAPI?.showOpenDialog) {
-      try {
-        const filePath = await window.electronAPI.showOpenDialog({
-          title,
-          filters
-        });
-        
-        if (filePath && onUIPrefsChange && uiPrefs) {
-          onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: filePath }));
-          addToast?.('success', 'File Updated', `Selected: ${filePath}`);
-          return;
-        }
-      } catch (err) {
-        console.warn('Electron showOpenDialog error, falling back to browser picker:', err);
-      }
-    }
+
 
     // 2. Web Browser mode fallback (Netlify / standard browser)
     activeKeyRef.current = key;
@@ -38,10 +22,31 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
     const file = e.target.files?.[0];
     const key = activeKeyRef.current;
     if (file && key && onUIPrefsChange && uiPrefs) {
-      await storeFileInRegistry(key, file);
-      const displayPath = file.name;
-      onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: displayPath }));
-      addToast?.('success', 'File Selected', `Selected file: ${displayPath}`);
+      try {
+        addToast?.('info', 'Uploading...', `Saving ${file.name} to local database and cloud storage.`);
+        // 1. Store in local IndexedDB for fast access
+        await storeFileInRegistry(key, file);
+        
+        // 2. Parse and save raw rows to Firestore if not PMIS
+        if (key !== 'pmis') {
+          // Dynamic import to avoid circular dependencies
+          const { getActiveProjectId, saveRawSourceToCloud } = await import('../../utils/projectStore');
+          const projectId = getActiveProjectId();
+          if (projectId) {
+            const { parseExcelBuffer } = await import('../../utils/fileLoader');
+            const bufferArray = await file.arrayBuffer();
+            const rawRows = await parseExcelBuffer(bufferArray);
+            await saveRawSourceToCloud(projectId, key, rawRows);
+            addToast?.('success', 'Cloud Upload Complete', `${file.name} is now stored securely online for this project.`);
+          }
+        }
+        
+        const displayPath = file.name;
+        onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: displayPath }));
+      } catch (err) {
+        console.error('File upload failed:', err);
+        addToast?.('error', 'Upload Failed', err.message || 'Could not save file online.');
+      }
     }
   };
 
@@ -76,10 +81,15 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
           <h2 style={{ fontSize: 'var(--text-lg)', color: 'var(--text-heading)', marginBottom: 'var(--sp-2)' }}>
             Data Inputs
           </h2>
-          <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--sp-6)', lineHeight: 1.5 }}>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: 'var(--sp-2)', lineHeight: 1.5 }}>
             By default, the application looks for specific files in the <code>raw-files</code> directory within your workspace. 
             You can override these defaults by selecting custom files from your computer.
           </p>
+          <div style={{ padding: 'var(--sp-3)', background: 'var(--bg-panel)', borderLeft: '4px solid var(--info)', borderRadius: 'var(--radius-md)', marginBottom: 'var(--sp-6)' }}>
+            <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
+              <strong>Note on Cloud Projects:</strong> Repaired and In-Service Excel files are securely uploaded to your Cloud Project so you can resume work on any device. However, for performance, the massive 168MB <strong>PMIS.csv</strong> never leaves your device and must be re-selected locally if you change computers.
+            </p>
+          </div>
           
           {/* Repaired Excel */}
           <div style={{ marginBottom: 'var(--sp-6)', padding: 'var(--sp-4)', background: 'var(--bg-elevated)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-default)' }}>

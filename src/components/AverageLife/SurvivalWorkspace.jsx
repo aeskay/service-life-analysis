@@ -15,22 +15,8 @@ export default function SurvivalWorkspace({ addToast }) {
     window.survivalDataCache = null;
     setIsLoading(true);
 
-    if (window.electronAPI?.runSurvivalAnalysis) {
-      window.electronAPI.runSurvivalAnalysis()
-        .then(res => {
-          if (res.error) {
-            runJSFallback();
-          } else {
-            window.survivalDataCache = res;
-            setData(res);
-            setError(null);
-            setIsLoading(false);
-          }
-        })
-        .catch(() => runJSFallback());
-    } else {
-      runJSFallback();
-    }
+    runJSFallback();
+
 
     function runJSFallback() {
       import('../../utils/stateStore').then(({ loadState }) => {

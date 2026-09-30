@@ -39,12 +39,6 @@ const DEFAULT_UI_PREFS = {
 export async function loadUIPrefs() {
   let stored = null;
 
-  // 1. Desktop Electron bridge
-  if (window.electronAPI?.readUIPrefs) {
-    try {
-      stored = await window.electronAPI.readUIPrefs();
-    } catch (_) {}
-  }
 
   // 2. Browser LocalStorage fallback
   if (!stored) {
@@ -101,14 +95,6 @@ export async function saveUIPrefs(prefs) {
     console.warn('Could not save UI preferences to LocalStorage:', err);
   }
 
-  // 2. Desktop Electron bridge
-  if (window.electronAPI?.writeUIPrefs) {
-    try {
-      await window.electronAPI.writeUIPrefs(prefs);
-    } catch (err) {
-      console.warn('Could not save UI preferences to Desktop disk:', err);
-    }
-  }
 }
 
 export function patchSplitLRPrefs(current, patch) {
