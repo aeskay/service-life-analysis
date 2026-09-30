@@ -150,8 +150,13 @@ export default function MapsWorkspace({ mode, addToast }) {
       setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 0);
     });
     try {
-      await window.electronAPI.generateMaps();
-      addToast && addToast('Maps generated successfully!', 'success');
+      if (window.electronAPI?.generateMaps) {
+        await window.electronAPI.generateMaps();
+        addToast && addToast('Maps generated successfully!', 'success');
+      } else {
+        setProgress(prev => [...prev, 'ℹ️ Map images loaded from static asset folder.']);
+        addToast && addToast('Map assets updated!', 'success');
+      }
       setRefreshKey(k => k + 1);
     } catch (err) {
       addToast && addToast('Map generation failed: ' + err.message, 'error');

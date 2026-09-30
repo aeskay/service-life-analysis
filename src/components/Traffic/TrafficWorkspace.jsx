@@ -212,12 +212,12 @@ export default function TrafficWorkspace({ addToast, uiPrefs, onUIPrefsChange })
   };
 
   const handleExport = async () => {
-    if (!results) return;
+    if (!results || !results.results) return;
     try {
-      const res = await window.electronAPI.exportTrafficExcel(results);
-      if (!res.canceled) {
-        addToast('success', 'Export Complete', `Successfully exported to ${res.filePath}`);
-      }
+      const { exportToExcel } = await import('../../utils/exporter');
+      const filename = `traffic_analysis_${trafficMode}.xlsx`;
+      await exportToExcel(results.results, filename);
+      addToast('success', 'Export Complete', `Exported traffic analysis to ${filename}`);
     } catch (e) {
       addToast('error', 'Export Failed', e.message || String(e));
     }

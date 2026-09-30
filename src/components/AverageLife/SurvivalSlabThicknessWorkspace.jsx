@@ -11,22 +11,38 @@ export default function SurvivalSlabThicknessWorkspace({ addToast }) {
     // Always run fresh — never serve stale data
     window.survivalSlabDataCache = null;
     setIsLoading(true);
-    window.electronAPI.runSurvivalAnalysisSlab()
-      .then(res => {
-        if (res.error) {
-          setError(res.error);
-        } else {
+
+    if (window.electronAPI?.runSurvivalAnalysisSlab) {
+      window.electronAPI.runSurvivalAnalysisSlab()
+        .then(res => {
+          if (res.error) {
+            runJSFallback();
+          } else {
+            window.survivalSlabDataCache = res;
+            setData(res);
+            setError(null);
+            setIsLoading(false);
+          }
+        })
+        .catch(() => runJSFallback());
+    } else {
+      runJSFallback();
+    }
+
+    function runJSFallback() {
+      import('../../utils/stateStore').then(({ loadState }) => loadState()).then(state => {
+        import('../../utils/survivalEngineJS').then(({ runSurvivalAnalysisSlabJS }) => {
+          const res = runSurvivalAnalysisSlabJS(state);
           window.survivalSlabDataCache = res;
           setData(res);
           setError(null);
-        }
-      })
-      .catch(err => {
-        setError(err.message);
-      })
-      .finally(() => {
+          setIsLoading(false);
+        });
+      }).catch(err => {
+        setError(err.message || String(err));
         setIsLoading(false);
       });
+    }
   }, [refreshTrigger]);
 
   if (isLoading) {

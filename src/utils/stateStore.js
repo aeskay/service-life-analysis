@@ -1,10 +1,12 @@
 /**
  * stateStore.js
  * Persists and restores split processing progress between sessions.
- * Uses Electron IPC for local offline disk cache and Firebase Firestore for cloud project sync.
+ * Uses Firestore for Cloud Projects, LocalStorage for Web Browser, and Electron IPC for Desktop.
  */
 
 import { getActiveProjectId, loadProjectStateFromCloud, saveProjectStateToCloud } from './projectStore';
+
+const LOCAL_STORAGE_KEY = 'service_life_app_state_v1';
 
 const DEFAULT_STATE = {
   version: 1,
@@ -34,27 +36,31 @@ const DEFAULT_STATE = {
 };
 
 /**
- * Load persisted state from active Cloud Project or local disk.
+ * Load persisted state from Cloud Project, Desktop disk, or Browser LocalStorage.
  * @returns {Promise<Object>} State object
  */
 export async function loadState() {
   const activeProjectId = getActiveProjectId();
 
-  // Try loading from active cloud project if set
+  // 1. Try loading from active cloud project if set
   if (activeProjectId) {
-    const cloudRes = await loadProjectStateFromCloud(activeProjectId);
-    if (cloudRes && cloudRes.state) {
-      return {
-        ...DEFAULT_STATE,
-        ...cloudRes.state,
-        reconstructed: { ...DEFAULT_STATE.reconstructed, ...(cloudRes.state.reconstructed || {}) },
-        inservice: { ...DEFAULT_STATE.inservice, ...(cloudRes.state.inservice || {}) },
-        trafficAnalysis: cloudRes.state.trafficAnalysis || {}
-      };
+    try {
+      const cloudRes = await loadProjectStateFromCloud(activeProjectId);
+      if (cloudRes && cloudRes.state) {
+        return {
+          ...DEFAULT_STATE,
+          ...cloudRes.state,
+          reconstructed: { ...DEFAULT_STATE.reconstructed, ...(cloudRes.state.reconstructed || {}) },
+          inservice: { ...DEFAULT_STATE.inservice, ...(cloudRes.state.inservice || {}) },
+          trafficAnalysis: cloudRes.state.trafficAnalysis || {}
+        };
+      }
+    } catch (err) {
+      console.warn('Could not read cloud project state:', err);
     }
   }
 
-  // Fallback to local Electron disk state
+  // 2. Desktop Electron disk state fallback
   if (window.electronAPI?.readState) {
     try {
       const stored = await window.electronAPI.readState();
@@ -72,15 +78,39 @@ export async function loadState() {
     }
   }
 
+  // 3. Web Browser LocalStorage fallback
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        ...DEFAULT_STATE,
+        ...parsed,
+        reconstructed: { ...DEFAULT_STATE.reconstructed, ...(parsed.reconstructed || {}) },
+        inservice: { ...DEFAULT_STATE.inservice, ...(parsed.inservice || {}) },
+        trafficAnalysis: parsed.trafficAnalysis || {}
+      };
+    }
+  } catch (err) {
+    console.warn('Could not read browser LocalStorage state:', err);
+  }
+
   return structuredClone(DEFAULT_STATE);
 }
 
 /**
- * Save state to local disk and sync to active Cloud Project.
+ * Save state to Cloud Project, Desktop disk, and Browser LocalStorage.
  * @param {Object} state
  */
 export async function saveState(state) {
-  // 1. Save to local disk for offline resilience
+  // 1. Save to browser LocalStorage
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(state));
+  } catch (err) {
+    console.warn('Failed saving state to LocalStorage:', err);
+  }
+
+  // 2. Save to local disk for desktop offline resilience
   if (window.electronAPI?.writeState) {
     try {
       await window.electronAPI.writeState(state);
@@ -89,7 +119,7 @@ export async function saveState(state) {
     }
   }
 
-  // 2. Sync to active Cloud Project if logged in & active project is set
+  // 3. Sync to active Cloud Project if logged in & active project is set
   const activeProjectId = getActiveProjectId();
   if (activeProjectId) {
     await saveProjectStateToCloud(activeProjectId, state);

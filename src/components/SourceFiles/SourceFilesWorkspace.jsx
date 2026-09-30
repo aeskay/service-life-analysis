@@ -1,5 +1,6 @@
 import React, { useCallback, useRef } from 'react';
 import { patchSourceFilesPrefs } from '../../utils/uiPreferences';
+import { storeFileInRegistry } from '../../utils/fileRegistry';
 
 export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, addToast }) {
   const fileInputRef = useRef(null);
@@ -33,10 +34,11 @@ export default function SourceFilesWorkspace({ paths, uiPrefs, onUIPrefsChange, 
     }
   }, [uiPrefs, onUIPrefsChange, addToast]);
 
-  const handleWebFileChange = (e) => {
+  const handleWebFileChange = async (e) => {
     const file = e.target.files?.[0];
     const key = activeKeyRef.current;
     if (file && key && onUIPrefsChange && uiPrefs) {
+      await storeFileInRegistry(key, file);
       const displayPath = file.name;
       onUIPrefsChange(patchSourceFilesPrefs(uiPrefs, { [key]: displayPath }));
       addToast?.('success', 'File Selected', `Selected file: ${displayPath}`);

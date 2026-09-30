@@ -1,13 +1,14 @@
 /**
  * fileLoader.js
- * Handles all file loading via Electron IPC bridge.
- * Uses SheetJS for .xlsx and PapaParse for .csv
+ * Handles file loading in pure web browsers (and optional desktop bridge).
+ * Uses SheetJS for .xlsx and PapaParse for .csv.
  */
 
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 import { loadUIPrefs } from './uiPreferences';
 import { cleanDistrictString, normalizeHighway } from './normalizers';
+import { getFileFromRegistry } from './fileRegistry';
 
 let cachedPMISHighways = null;
 let cachedPMISMap = null;
@@ -40,78 +41,138 @@ async function parseExcelBuffer(bufferArray) {
 }
 
 /**
- * Load an Excel file through the Electron IPC bridge.
- * @param {string} filename - Filename in raw-files/ (e.g. "repaired.xlsx")
+ * Load an Excel file via browser memory, fetch API, or optional desktop bridge.
+ * @param {string} key - Registry key ('repaired' | 'inservice')
+ * @param {string} defaultFilename - Filename (e.g. "repaired.xlsx")
  * @param {string} [customPath] - Optional override path
- * @returns {Promise<Array<Object>>} Array of row objects (first sheet)
+ * @returns {Promise<Array<Object>>} Array of row objects
  */
-async function loadExcelFile(filename, customPath) {
-  if (!window.electronAPI) {
-    throw new Error('Electron API not available. Run via Electron.');
+async function loadExcelFile(key, defaultFilename, customPath) {
+  // 1. Check browser file registry / uploaded File object
+  const registeredFile = await getFileFromRegistry(key);
+  if (registeredFile) {
+    const bufferArray = await registeredFile.arrayBuffer();
+    return parseExcelBuffer(bufferArray);
   }
 
-  const bufferArray = await window.electronAPI.readFileBuffer(filename, customPath);
-  return parseExcelBuffer(bufferArray);
+  // 2. Desktop bridge fallback if running inside Electron shell
+  if (window.electronAPI?.readFileBuffer) {
+    try {
+      const bufferArray = await window.electronAPI.readFileBuffer(defaultFilename, customPath);
+      return parseExcelBuffer(bufferArray);
+    } catch (err) {
+      console.warn('Desktop bridge read failed, falling back to web fetch:', err);
+    }
+  }
+
+  // 3. Web fetch relative asset paths
+  const baseName = defaultFilename.replace('.xlsx', '');
+  const candidateUrls = [
+    customPath,
+    `/raw-files/${defaultFilename}`,
+    `/raw-files/${baseName}_new.xlsx`,
+    `/${defaultFilename}`,
+    `/${baseName}_new.xlsx`,
+  ].filter(Boolean);
+
+  for (const url of candidateUrls) {
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const bufferArray = await resp.arrayBuffer();
+        return parseExcelBuffer(bufferArray);
+      }
+    } catch (_) {
+      // try next path
+    }
+  }
+
+  throw new Error(`Data file "${defaultFilename}" not found. Please go to Source Files workspace and upload your file.`);
 }
 
 export async function loadRepaired() {
   const prefs = await loadUIPrefs();
-  return loadExcelFile('repaired.xlsx', prefs.sourceFiles?.repaired);
+  return loadExcelFile('repaired', 'repaired.xlsx', prefs.sourceFiles?.repaired);
 }
 
 export async function loadInService() {
   const prefs = await loadUIPrefs();
-  return loadExcelFile('in-service.xlsx', prefs.sourceFiles?.inservice);
+  return loadExcelFile('inservice', 'in-service.xlsx', prefs.sourceFiles?.inservice);
+}
+
+/**
+ * Get PMIS source (File object, string content, or fetch URL)
+ */
+async function getPMISSource(customPath) {
+  const registeredFile = await getFileFromRegistry('pmis');
+  if (registeredFile) {
+    return registeredFile;
+  }
+
+  if (window.electronAPI?.readPmisText) {
+    try {
+      return await window.electronAPI.readPmisText(customPath);
+    } catch (err) {
+      console.warn('Desktop PMIS text read failed, falling back to web fetch:', err);
+    }
+  }
+
+  const candidateUrls = [
+    customPath,
+    '/raw-files/PMIS.csv',
+    '/PMIS.csv'
+  ].filter(Boolean);
+
+  for (const url of candidateUrls) {
+    try {
+      const resp = await fetch(url, { method: 'HEAD' });
+      if (resp.ok) return url;
+    } catch (_) {}
+  }
+
+  return '/raw-files/PMIS.csv';
 }
 
 /**
  * Load and parse PMIS.csv, extracting unique highway IDs.
- * The relevant column is "SIGNED HWY AND ROADBED ID".
  * @returns {Promise<Set<string>>} Set of unique highway strings
  */
 export async function loadPMISHighways() {
   if (cachedPMISHighways) return cachedPMISHighways;
 
-  if (!window.electronAPI) {
-    throw new Error('Electron API not available. Run via Electron.');
-  }
-
   const prefs = await loadUIPrefs();
-  const customPath = prefs.sourceFiles?.pmis;
-
-  const csvText = await window.electronAPI.readPmisText(customPath);
+  const source = await getPMISSource(prefs.sourceFiles?.pmis);
 
   return new Promise((resolve, reject) => {
     const highwaySet = new Set();
 
-    Papa.parse(csvText, {
+    Papa.parse(source, {
       header: true,
+      download: typeof source === 'string' && source.startsWith('/'),
       encoding: 'latin1',
       skipEmptyLines: true,
       step: (result) => {
         const row = result.data;
-        // Primary lookup column
         const val = row['SIGNED HWY AND ROADBED ID'];
         if (val && typeof val === 'string') {
           highwaySet.add(normalizeHighway(val));
         }
-        // Also index HIGHWAY ROADBED ID as secondary
         const val2 = row['HIGHWAY ROADBED ID'];
         if (val2 && typeof val2 === 'string' && val2.trim()) {
           highwaySet.add(normalizeHighway(val2));
         }
       },
-      complete: () => resolve(highwaySet),
+      complete: () => {
+        cachedPMISHighways = highwaySet;
+        resolve(highwaySet);
+      },
       error: (err) => reject(err),
     });
   });
 }
 
 /**
- * Return the cached PMIS detail map (same map used for matching, now with
- * extra score/distress fields stored per entry). Triggers a full parse if
- * not yet cached — subsequent calls are instant.
- * @returns {Promise<Map<string, Array<Object>>>}
+ * Return the cached PMIS detail map.
  */
 export async function loadPMISDetailMap() {
   if (cachedPMISMap) return cachedPMISMap.pmisMap;
@@ -130,53 +191,40 @@ export async function loadPMISDistributions() {
   const { pmisDistributions } = await loadPMISDataForMatching();
   return pmisDistributions;
 }
+
 /**
  * Load and parse PMIS.csv into a Map for range matching.
- * Groups data by "District|Highway".
- * Parses TRM Number + Displacement for both Begin and End.
- * Results are cached in memory so it only takes a few seconds on the very first load.
- * @returns {Promise<{ pmisMap: Map<string, Array<Object>>, availableYears: Array<number> }>}
  */
 export async function loadPMISDataForMatching() {
   if (cachedPMISMap) return cachedPMISMap;
 
-  if (!window.electronAPI) {
-    throw new Error('Electron API not available. Run via Electron.');
-  }
-
   const prefs = await loadUIPrefs();
-  const customPath = prefs.sourceFiles?.pmis;
-
-  const csvText = await window.electronAPI.readPmisText(customPath);
+  const source = await getPMISSource(prefs.sourceFiles?.pmis);
 
   return new Promise((resolve, reject) => {
     const pmisMap = new Map();
     const yearSet = new Set();
-    const pmisTrends = {}; // { year: { CRCP: laneMiles, JCP: laneMiles, ACP: laneMiles } }
+    const pmisTrends = {};
     const pmisDistributions = {};
 
-
-
-    Papa.parse(csvText, {
+    Papa.parse(source, {
       header: true,
+      download: typeof source === 'string' && source.startsWith('/'),
       encoding: 'latin1',
       skipEmptyLines: true,
       step: (result) => {
         const row = result.data;
-        
         const year = parseInt(row['FISCAL YEAR'], 10);
         
-        // --- AGGREGATE TRENDS BEFORE ANY FILTERING ---
         if (!isNaN(year) && year >= 1900 && year <= 2100) {
           yearSet.add(year);
           if (!pmisTrends[year]) pmisTrends[year] = { CRCP: 0, JCP: 0, ACP: 0 };
           const pvmntType1 = (row['DETAILED PVMNT TYPE'] || '').toUpperCase().trim();
           const pvmntType2 = (row['DETAILED PVMNT TYPE ROAD LIFE'] || '').toUpperCase().trim();
           const pvmntType = pvmntType1 || pvmntType2;
-          const numLanes = parseFloat(row['NUMBER THRU LANES']) || 1; // Fallback to 1
+          const numLanes = parseFloat(row['NUMBER THRU LANES']) || 1;
           const length = parseFloat(row['CALCULATED LENGTH']) || 0;
           const laneMiles = length * numLanes;
-          
           
           if (pvmntType.includes('CRCP') || pvmntType.includes('CONTINUOUSLY REINFORCED CONCRETE') || pvmntType === '01 - CONTINUOUSLY REINFORCED CONCRETE (CRCP)') {
               pmisTrends[year].CRCP += laneMiles;
@@ -194,7 +242,6 @@ export async function loadPMISDataForMatching() {
                 };
               }
               const dists = pmisDistributions[year];
-              
               const cond = parseFloat(row['CONDITION SCORE']);
               const dist = parseFloat(row['DISTRESS SCORE']);
               const ride = parseFloat(row['RIDE SCORE']);
@@ -220,16 +267,12 @@ export async function loadPMISDataForMatching() {
               pmisTrends[year].ACP += laneMiles;
           }
         }
-        // ---------------------------------------------
 
         const district = cleanDistrictString(row['RESPONSIBLE DISTRICT']);
         const highway = normalizeHighway(row['SIGNED HWY AND ROADBED ID'] || row['HIGHWAY ROADBED ID']);
-        
         if (!highway) return;
 
-        // Grouping key: DISTRICT|HIGHWAY
         const key = `${district}|${highway}`;
-
         const beginTrm = parseFloat(row['BEGINNING TRM NUMBER']) || 0;
         const beginDisp = parseFloat(row['BEGINNING TRM DISPLACEMENT']) || 0;
         const endTrm = parseFloat(row['ENDING TRM NUMBER']) || 0;
@@ -238,7 +281,6 @@ export async function loadPMISDataForMatching() {
         const startRef = beginTrm + beginDisp;
         const endRef = endTrm + endDisp;
 
-        // Skip rows with no valid range or year
         if (isNaN(year) || (startRef === 0 && endRef === 0)) return;
 
         if (!pmisMap.has(key)) {
@@ -249,7 +291,6 @@ export async function loadPMISDataForMatching() {
           year,
           startRef,
           endRef,
-          // ── Chart detail fields ──────────────────────────────────────────
           distressScore:  parseFloat(row['DISTRESS SCORE'])   || null,
           conditionScore: parseFloat(row['CONDITION SCORE'])  || null,
           rideScore:      parseFloat(row['RIDE SCORE'])        || null,
@@ -260,7 +301,6 @@ export async function loadPMISDataForMatching() {
           spalledCracks:  parseFloat(row['CRCP SPALLED CRACKS QTY']) || 0,
           calcLength:     parseFloat(row['CALCULATED LENGTH'])         || 0,
         });
-        
       },
       complete: () => {
         const availableYears = Array.from(yearSet).sort((a, b) => a - b);
@@ -271,4 +311,3 @@ export async function loadPMISDataForMatching() {
     });
   });
 }
-

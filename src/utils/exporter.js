@@ -1,6 +1,6 @@
 /**
  * exporter.js
- * Exports processed rows to a formatted .xlsx file via Electron IPC.
+ * Exports processed rows to a formatted .xlsx file natively in browser.
  */
 
 import * as XLSX from 'xlsx';
@@ -11,12 +11,10 @@ import * as XLSX from 'xlsx';
  *
  * @param {Array<Object>} rows           - Processed data rows
  * @param {string}        defaultName    - Default filename suggestion
- * @returns {Promise<string|null>}       - Path where file was saved, or null if cancelled
+ * @returns {Promise<string|null>}       - Path or filename where saved
  */
-export async function exportToExcel(rows, defaultName) {
-  if (!window.electronAPI) {
-    throw new Error('Electron API not available.');
-  }
+export async function exportToExcel(rows, defaultName = 'export.xlsx') {
+  if (!rows || rows.length === 0) return null;
 
   // Strip internal metadata columns
   const cleanRows = rows.map(row => {
@@ -37,23 +35,40 @@ export async function exportToExcel(rows, defaultName) {
   worksheet['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 4, 12) }));
 
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Split L-R');
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Data Export');
 
   // Write to buffer
   const xlsxBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
 
-  // Ask user where to save — dialog defaults to processed/ but user can browse anywhere
-  const savePath = await window.electronAPI.showSaveDialog(defaultName);
-  if (!savePath) return null;
+  // 1. Desktop Electron fallback if window.electronAPI is present
+  if (window.electronAPI?.showSaveDialog && window.electronAPI?.writeExcel) {
+    try {
+      const savePath = await window.electronAPI.showSaveDialog(defaultName);
+      if (!savePath) return null;
+      await window.electronAPI.writeExcel(
+        savePath,
+        Array.from(new Uint8Array(xlsxBuffer))
+      );
+      return savePath;
+    } catch (err) {
+      console.warn('Desktop save dialog failed, falling back to browser download:', err);
+    }
+  }
 
-  // Pass the FULL chosen path to the main process so the file lands exactly
-  // where the user picked, even if they navigated outside processed/
-  await window.electronAPI.writeExcel(
-    savePath,
-    Array.from(new Uint8Array(xlsxBuffer))
-  );
+  // 2. Pure Web Browser Download
+  const blob = new Blob([xlsxBuffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = defaultName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 
-  return savePath;
+  return defaultName;
 }
 
 /**

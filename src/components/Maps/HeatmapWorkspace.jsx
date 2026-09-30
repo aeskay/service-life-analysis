@@ -150,8 +150,13 @@ export default function HeatmapWorkspace({ mode, addToast }) {
       setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 0);
     });
     try {
-      await window.electronAPI.generateHeatmaps();
-      addToast && addToast('Heatmaps generated successfully!', 'success');
+      if (window.electronAPI?.generateHeatmaps) {
+        await window.electronAPI.generateHeatmaps();
+        addToast && addToast('Heatmaps generated successfully!', 'success');
+      } else {
+        setProgress(prev => [...prev, 'ℹ️ Heatmap images loaded from static asset folder.']);
+        addToast && addToast('Heatmap assets updated!', 'success');
+      }
       setRefreshKey(k => k + 1);
     } catch (err) {
       addToast && addToast('Heatmap generation failed: ' + err.message, 'error');

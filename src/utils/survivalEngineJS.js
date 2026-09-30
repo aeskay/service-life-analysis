@@ -75,12 +75,10 @@ export function calculateKaplanMeier(dataItems) {
     }
 
     // Reduce at-risk for next duration
-    // Count total items with Age <= t
     atRisk -= sorted.filter(x => Math.abs(x.Age - t) < 0.00001).length;
   }
 
   if (median === null && survival[survival.length - 1] > 0.5) {
-    // Extrapolate or use last time if survival never drops below 0.5
     median = timeline[timeline.length - 1];
   }
 
@@ -138,19 +136,135 @@ export function runServiceLifeSurvivalJS(state) {
   const inServiceKm = calculateKaplanMeier(inServiceData);
 
   return {
-    recon_timeline: reconKm.timeline,
-    recon_survival: reconKm.survival,
-    recon_ci_lower: reconKm.ci_lower,
-    recon_ci_upper: reconKm.ci_upper,
-    recon_median: reconKm.median,
+    timeline: reconKm.timeline,
+    survival: reconKm.survival,
+    ci_lower: reconKm.ci_lower,
+    ci_upper: reconKm.ci_upper,
+    median: reconKm.median,
+
+    r_timeline: reconKm.timeline,
+    r_survival: reconKm.survival,
+    r_median: reconKm.median,
 
     insvc_timeline: inServiceKm.timeline,
     insvc_survival: inServiceKm.survival,
-    insvc_ci_lower: inServiceKm.ci_lower,
-    insvc_ci_upper: inServiceKm.ci_upper,
     insvc_median: inServiceKm.median,
 
     total_recon: reconData.length,
     total_insvc: inServiceData.length
   };
+}
+
+export function runSurvivalAnalysisBaseJS(state) {
+  const reconRows = state.reconstructed?.rows || state.reconstructed?.pmisRows || [];
+  const inServiceRows = state.inservice?.rows || state.inservice?.pmisRows || [];
+
+  const reconVerified = new Set(state.reconstructed?.verifiedSNs || []);
+  const inServiceVerified = new Set(state.inservice?.verifiedSNs || []);
+
+  const reconEOLMap = state.reconstructed?.actualEndOfLifeMap || {};
+  const inServiceYCMap = state.inservice?.actualYearConstMap || {};
+  const currentYear = new Date().getFullYear();
+
+  const groups = {};
+
+  const processRow = (r, isRecon, verifiedSet) => {
+    const id = String(r.ID || r['S/N'] || '');
+    if (verifiedSet.size > 0 && !verifiedSet.has(id)) return;
+
+    const rawTh = r['Base Th'] || r['Base Thickness'] || r['BASE_THICKNESS'] || r['Base_Th'];
+    let thVal = parseFloat(rawTh);
+    if (isNaN(thVal) || thVal <= 0) return;
+
+    const thKey = thVal.toFixed(1);
+    if (!groups[thKey]) groups[thKey] = [];
+
+    const yc = Number(r['Year Constructed'] || r['CONSTRUCTION_YEAR']) || 0;
+    if (isRecon) {
+      const eolVal = Number(reconEOLMap[id] || r['End of Life'] || r['END_OF_LIFE']);
+      let sl = Number(r['Service Life'] || r['SERVICE_LIFE']) || 0;
+      if (yc > 0 && eolVal > 0) sl = eolVal - yc;
+      if (sl > 0) groups[thKey].push({ Age: sl, Event: 1 });
+    } else {
+      const activeYC = Number(inServiceYCMap[id] || yc);
+      if (activeYC > 0) {
+        const age = currentYear - activeYC;
+        if (age > 0) groups[thKey].push({ Age: age, Event: 0 });
+      }
+    }
+  };
+
+  for (const r of reconRows) processRow(r, true, reconVerified);
+  for (const r of inServiceRows) processRow(r, false, inServiceVerified);
+
+  const result = {};
+  for (const [thKey, items] of Object.entries(groups)) {
+    if (items.length === 0) continue;
+    const km = calculateKaplanMeier(items);
+    result[thKey] = {
+      timeline: km.timeline,
+      survival: km.survival,
+      median: km.median,
+      count: items.length
+    };
+  }
+
+  return result;
+}
+
+export function runSurvivalAnalysisSlabJS(state) {
+  const reconRows = state.reconstructed?.rows || state.reconstructed?.pmisRows || [];
+  const inServiceRows = state.inservice?.rows || state.inservice?.pmisRows || [];
+
+  const reconVerified = new Set(state.reconstructed?.verifiedSNs || []);
+  const inServiceVerified = new Set(state.inservice?.verifiedSNs || []);
+
+  const reconEOLMap = state.reconstructed?.actualEndOfLifeMap || {};
+  const inServiceYCMap = state.inservice?.actualYearConstMap || {};
+  const currentYear = new Date().getFullYear();
+
+  const groups = {};
+
+  const processRow = (r, isRecon, verifiedSet) => {
+    const id = String(r.ID || r['S/N'] || '');
+    if (verifiedSet.size > 0 && !verifiedSet.has(id)) return;
+
+    const rawTh = r['Old Slab Th'] || r['Slab Thickness'] || r['SLAB_THICKNESS'] || r['D_SLAB'];
+    let thVal = parseFloat(rawTh);
+    if (isNaN(thVal) || thVal <= 0) return;
+
+    const thKey = thVal.toFixed(1);
+    if (!groups[thKey]) groups[thKey] = [];
+
+    const yc = Number(r['Year Constructed'] || r['CONSTRUCTION_YEAR']) || 0;
+    if (isRecon) {
+      const eolVal = Number(reconEOLMap[id] || r['End of Life'] || r['END_OF_LIFE']);
+      let sl = Number(r['Service Life'] || r['SERVICE_LIFE']) || 0;
+      if (yc > 0 && eolVal > 0) sl = eolVal - yc;
+      if (sl > 0) groups[thKey].push({ Age: sl, Event: 1 });
+    } else {
+      const activeYC = Number(inServiceYCMap[id] || yc);
+      if (activeYC > 0) {
+        const age = currentYear - activeYC;
+        if (age > 0) groups[thKey].push({ Age: age, Event: 0 });
+      }
+    }
+  };
+
+  for (const r of reconRows) processRow(r, true, reconVerified);
+  for (const r of inServiceRows) processRow(r, false, inServiceVerified);
+
+  const result = {};
+  for (const [thKey, items] of Object.entries(groups)) {
+    if (items.length === 0) continue;
+    const km = calculateKaplanMeier(items);
+    result[thKey] = {
+      timeline: km.timeline,
+      survival: km.survival,
+      median: km.median,
+      count: items.length
+    };
+  }
+
+  return result;
 }

@@ -1,11 +1,12 @@
 /**
  * uiPreferences.js
  * Manages persistent UI state: mode, active tab, column visibility, and any
- * future per-session preferences. Saved to .app-state/ui_preferences.json
- * via Electron IPC so the app restores exactly as the user left it.
+ * future per-session preferences. Saved to Browser LocalStorage and Desktop disk.
  */
 
 import { ALL_COLUMNS, DEFAULT_VISIBLE_KEYS } from '../components/SplitLR/DataTable';
+
+const LOCAL_STORAGE_KEY = 'service_life_ui_prefs_v2';
 
 const DEFAULT_HIDDEN_BASE = ALL_COLUMNS
   .map(c => c.key)
@@ -32,73 +33,84 @@ const DEFAULT_UI_PREFS = {
 };
 
 /**
- * Load UI preferences from disk.
- * Falls back to defaults if the file doesn't exist or can't be parsed.
+ * Load UI preferences from Desktop disk or Browser LocalStorage.
  * @returns {Promise<Object>}
  */
 export async function loadUIPrefs() {
-  if (!window.electronAPI) return structuredClone(DEFAULT_UI_PREFS);
-  try {
-    let stored = await window.electronAPI.readUIPrefs();
-    if (!stored) return structuredClone(DEFAULT_UI_PREFS);
-    
-    // Migrate v1 to v2 (semantic change for hiddenColumns)
-    if (!stored.version || stored.version < 2) {
-      stored.version = 2;
-      if (stored.splitLR && (!stored.splitLR.hiddenColumns || stored.splitLR.hiddenColumns.length === 0)) {
-        stored.splitLR.hiddenColumns = [...DEFAULT_HIDDEN_BASE];
-      }
-      if (stored.matchPMIS && (!stored.matchPMIS.hiddenColumns || stored.matchPMIS.hiddenColumns.length === 0)) {
-        stored.matchPMIS.hiddenColumns = [...DEFAULT_HIDDEN_BASE];
-      }
-    }
+  let stored = null;
 
-    // Deep-merge with defaults to handle schema additions across app versions
-    return {
-      ...DEFAULT_UI_PREFS,
-      ...stored,
-      splitLR: {
-        ...DEFAULT_UI_PREFS.splitLR,
-        ...(stored.splitLR || {}),
-      },
-      matchPMIS: {
-        ...DEFAULT_UI_PREFS.matchPMIS,
-        ...(stored.matchPMIS || {}),
-      },
-      verify: {
-        ...DEFAULT_UI_PREFS.verify,
-        ...(stored.verify || {}),
-      },
-      sourceFiles: {
-        ...DEFAULT_UI_PREFS.sourceFiles,
-        ...(stored.sourceFiles || {}),
-      },
-    };
-  } catch {
-    return structuredClone(DEFAULT_UI_PREFS);
+  // 1. Desktop Electron bridge
+  if (window.electronAPI?.readUIPrefs) {
+    try {
+      stored = await window.electronAPI.readUIPrefs();
+    } catch (_) {}
   }
+
+  // 2. Browser LocalStorage fallback
+  if (!stored) {
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (raw) stored = JSON.parse(raw);
+    } catch (_) {}
+  }
+
+  if (!stored) return structuredClone(DEFAULT_UI_PREFS);
+
+  // Migrate v1 to v2 (semantic change for hiddenColumns)
+  if (!stored.version || stored.version < 2) {
+    stored.version = 2;
+    if (stored.splitLR && (!stored.splitLR.hiddenColumns || stored.splitLR.hiddenColumns.length === 0)) {
+      stored.splitLR.hiddenColumns = [...DEFAULT_HIDDEN_BASE];
+    }
+    if (stored.matchPMIS && (!stored.matchPMIS.hiddenColumns || stored.matchPMIS.hiddenColumns.length === 0)) {
+      stored.matchPMIS.hiddenColumns = [...DEFAULT_HIDDEN_BASE];
+    }
+  }
+
+  return {
+    ...DEFAULT_UI_PREFS,
+    ...stored,
+    splitLR: {
+      ...DEFAULT_UI_PREFS.splitLR,
+      ...(stored.splitLR || {}),
+    },
+    matchPMIS: {
+      ...DEFAULT_UI_PREFS.matchPMIS,
+      ...(stored.matchPMIS || {}),
+    },
+    verify: {
+      ...DEFAULT_UI_PREFS.verify,
+      ...(stored.verify || {}),
+    },
+    sourceFiles: {
+      ...DEFAULT_UI_PREFS.sourceFiles,
+      ...(stored.sourceFiles || {}),
+    },
+  };
 }
 
 /**
- * Save the current UI preferences to disk.
- * Called whenever the user changes mode, tab, column visibility, etc.
+ * Save current UI preferences.
  * @param {Object} prefs
  */
 export async function saveUIPrefs(prefs) {
-  if (!window.electronAPI) return;
+  // 1. Browser LocalStorage
   try {
-    await window.electronAPI.writeUIPrefs(prefs);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(prefs));
   } catch (err) {
-    console.warn('Could not save UI preferences:', err);
+    console.warn('Could not save UI preferences to LocalStorage:', err);
+  }
+
+  // 2. Desktop Electron bridge
+  if (window.electronAPI?.writeUIPrefs) {
+    try {
+      await window.electronAPI.writeUIPrefs(prefs);
+    } catch (err) {
+      console.warn('Could not save UI preferences to Desktop disk:', err);
+    }
   }
 }
 
-/**
- * Build an updated prefs object patching only the splitLR section.
- * @param {Object} current  - Existing prefs
- * @param {Object} patch    - Partial splitLR update, e.g. { hiddenColumns: [...] }
- * @returns {Object}
- */
 export function patchSplitLRPrefs(current, patch) {
   return {
     ...current,
