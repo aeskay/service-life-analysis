@@ -82,7 +82,6 @@ export default function TopNav({ mode, onModeChange, onOpenAuthModal, onOpenProj
 
       {/* Dataset Mode Toggle */}
       <div className="dataset-toggle" role="group" aria-label="Dataset mode">
-        <span className="dataset-toggle__label">Dataset</span>
         <div
           id="dataset-toggle-pill"
           className="toggle-pill"

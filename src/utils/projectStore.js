@@ -10,11 +10,27 @@ import {
   where, 
   serverTimestamp 
 } from 'firebase/firestore';
-import { db } from '../config/firebase';
+import { auth, db } from '../config/firebase';
 
 const PROJECTS_COLLECTION = 'projects';
 const ACTIVE_PROJECT_KEY = 'crcp_active_project_id';
 const CHUNK_SIZE = 40; // 40 items per doc ensures safe payload < 100KB (limit is 1000KB)
+
+/**
+ * Helper to wait for Firebase Auth to complete its initial state check
+ */
+export function waitForAuth() {
+  return new Promise((resolve) => {
+    if (auth.currentUser) {
+      resolve(auth.currentUser);
+      return;
+    }
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      unsubscribe();
+      resolve(user);
+    });
+  });
+}
 
 /**
  * Get the currently stored active project ID from localStorage (only stores active ID string)
@@ -39,21 +55,26 @@ export function setActiveProjectId(projectId) {
  */
 export async function getUserProjects(uid) {
   if (!uid) return [];
-  const q = query(
-    collection(db, PROJECTS_COLLECTION), 
-    where('ownerUid', '==', uid)
-  );
-  const querySnapshot = await getDocs(q);
-  const projects = [];
-  querySnapshot.forEach((docSnap) => {
-    projects.push({ id: docSnap.id, ...docSnap.data() });
-  });
+  try {
+    const q = query(
+      collection(db, PROJECTS_COLLECTION), 
+      where('ownerUid', '==', uid)
+    );
+    const querySnapshot = await getDocs(q);
+    const projects = [];
+    querySnapshot.forEach((docSnap) => {
+      projects.push({ id: docSnap.id, ...docSnap.data() });
+    });
 
-  return projects.sort((a, b) => {
-    const tA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (new Date(a.updatedAt || 0).getTime());
-    const tB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (new Date(b.updatedAt || 0).getTime());
-    return tB - tA;
-  });
+    return projects.sort((a, b) => {
+      const tA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : (new Date(a.updatedAt || 0).getTime());
+      const tB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : (new Date(b.updatedAt || 0).getTime());
+      return tB - tA;
+    });
+  } catch (err) {
+    console.warn('getUserProjects error:', err.message);
+    return [];
+  }
 }
 
 /**
@@ -280,25 +301,32 @@ export async function loadTrafficStateFromCloud(projectId) {
  */
 export async function loadProjectStateFromCloud(projectId) {
   if (!projectId) return null;
+  const user = await waitForAuth();
+  if (!user) return null;
 
-  const projectDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId));
-  if (!projectDoc.exists()) return null;
+  try {
+    const projectDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId));
+    if (!projectDoc.exists()) return null;
 
-  const [reconstructed, inservice, trafficAnalysis] = await Promise.all([
-    loadModuleStateFromCloud(projectId, 'reconstructed'),
-    loadModuleStateFromCloud(projectId, 'inservice'),
-    loadTrafficStateFromCloud(projectId),
-  ]);
+    const [reconstructed, inservice, trafficAnalysis] = await Promise.all([
+      loadModuleStateFromCloud(projectId, 'reconstructed'),
+      loadModuleStateFromCloud(projectId, 'inservice'),
+      loadTrafficStateFromCloud(projectId),
+    ]);
 
-  return {
-    metadata: { id: projectDoc.id, ...projectDoc.data() },
-    state: {
-      version: 1,
-      reconstructed,
-      inservice,
-      trafficAnalysis,
-    }
-  };
+    return {
+      metadata: { id: projectDoc.id, ...projectDoc.data() },
+      state: {
+        version: 1,
+        reconstructed,
+        inservice,
+        trafficAnalysis,
+      }
+    };
+  } catch (err) {
+    console.warn('loadProjectStateFromCloud skipped (unauthorized or network error):', err.message);
+    return null;
+  }
 }
 
 /**
@@ -306,23 +334,29 @@ export async function loadProjectStateFromCloud(projectId) {
  */
 export async function saveProjectStateToCloud(projectId, state) {
   if (!projectId || !state) return;
+  const user = await waitForAuth();
+  if (!user) return;
 
-  const promises = [];
-  if (state.reconstructed) {
-    promises.push(saveModuleStateToCloud(projectId, 'reconstructed', state.reconstructed));
-  }
-  if (state.inservice) {
-    promises.push(saveModuleStateToCloud(projectId, 'inservice', state.inservice));
-  }
-  if (state.trafficAnalysis) {
-    promises.push(saveTrafficStateToCloud(projectId, state.trafficAnalysis));
-  }
+  try {
+    const promises = [];
+    if (state.reconstructed) {
+      promises.push(saveModuleStateToCloud(projectId, 'reconstructed', state.reconstructed));
+    }
+    if (state.inservice) {
+      promises.push(saveModuleStateToCloud(projectId, 'inservice', state.inservice));
+    }
+    if (state.trafficAnalysis) {
+      promises.push(saveTrafficStateToCloud(projectId, state.trafficAnalysis));
+    }
 
-  promises.push(updateDoc(doc(db, PROJECTS_COLLECTION, projectId), {
-    updatedAt: serverTimestamp()
-  }));
+    promises.push(updateDoc(doc(db, PROJECTS_COLLECTION, projectId), {
+      updatedAt: serverTimestamp()
+    }));
 
-  await Promise.all(promises);
+    await Promise.all(promises);
+  } catch (err) {
+    console.warn('saveProjectStateToCloud skipped (unauthorized or network error):', err.message);
+  }
 }
 
 /**
