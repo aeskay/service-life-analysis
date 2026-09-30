@@ -77,7 +77,6 @@ export default function TopNav({ mode, onModeChange, onOpenAuthModal, onOpenProj
         </div>
         <div className="topnav__title">
           <span className="topnav__title-main">CRCP Service Life Analysis</span>
-          <span className="topnav__title-sub">Texas Tech University · TxDOT Research</span>
         </div>
       </div>
 
