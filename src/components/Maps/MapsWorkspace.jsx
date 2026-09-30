@@ -145,25 +145,15 @@ export default function MapsWorkspace({ mode, addToast }) {
   const handleGenerate = async () => {
     setGenerating(true);
     setProgress([]);
-    window.electronAPI?.onMapGenProgress(line => {
-      setProgress(prev => [...prev, line.trim()]);
-      setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 0);
-    });
     try {
-      if (window.electronAPI?.generateMaps) {
-        await window.electronAPI.generateMaps();
-        addToast && addToast('Maps generated successfully!', 'success');
-      } else {
-        setProgress(prev => [...prev, 'ℹ️ Map images loaded from static asset folder.']);
-        addToast && addToast('Map assets updated!', 'success');
-      }
+      setProgress(prev => [...prev, 'ℹ️ Map images loaded from static asset folder.']);
+      addToast && addToast('Map assets updated!', 'success');
       setRefreshKey(k => k + 1);
     } catch (err) {
-      addToast && addToast('Map generation failed: ' + err.message, 'error');
+      addToast && addToast('Map update failed: ' + err.message, 'error');
       setProgress(prev => [...prev, '❌ ' + err.message]);
     } finally {
       setGenerating(false);
-      window.electronAPI?.offMapGenProgress();
     }
   };
 

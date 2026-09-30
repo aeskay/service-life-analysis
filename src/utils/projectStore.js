@@ -209,6 +209,32 @@ export async function saveModuleStateToCloud(projectId, moduleName, moduleData) 
   });
 }
 
+export async function saveRawSourceToCloud(projectId, key, rawRows) {
+  if (!projectId || !rawRows) return;
+  const manifestRef = doc(db, PROJECTS_COLLECTION, projectId, `raw_${key}_data`, '_manifest');
+  const manifestSnap = await getDoc(manifestRef);
+  const oldManifest = manifestSnap.exists() ? manifestSnap.data() : {};
+
+  const rowsChunksCount = await saveArrayChunks(projectId, `raw_${key}`, 'rawRows', rawRows);
+  await cleanupOldChunks(projectId, `raw_${key}`, 'rawRows', oldManifest.rowsChunksCount || 0, rowsChunksCount);
+
+  await setDoc(manifestRef, {
+    rowsChunksCount,
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export async function loadRawSourceFromCloud(projectId, key) {
+  if (!projectId) return null;
+  const manifestRef = doc(db, PROJECTS_COLLECTION, projectId, `raw_${key}_data`, '_manifest');
+  const manifestSnap = await getDoc(manifestRef);
+  if (!manifestSnap.exists()) return null;
+  
+  const manifest = manifestSnap.data();
+  const rawRows = await loadArrayChunks(projectId, `raw_${key}`, 'rawRows', manifest.rowsChunksCount || 0);
+  return rawRows.length > 0 ? rawRows : null;
+}
+
 export async function loadModuleStateFromCloud(projectId, moduleName) {
   const metaRef = doc(db, PROJECTS_COLLECTION, projectId, 'modules', moduleName);
   const metaSnap = await getDoc(metaRef);
@@ -324,8 +350,8 @@ export async function loadProjectStateFromCloud(projectId) {
       }
     };
   } catch (err) {
-    console.warn('loadProjectStateFromCloud skipped (unauthorized or network error):', err.message);
-    return null;
+    console.error('loadProjectStateFromCloud failed:', err.message);
+    throw err;
   }
 }
 
@@ -356,6 +382,7 @@ export async function saveProjectStateToCloud(projectId, state) {
     await Promise.all(promises);
   } catch (err) {
     console.warn('saveProjectStateToCloud skipped (unauthorized or network error):', err.message);
+    throw err;
   }
 }
 

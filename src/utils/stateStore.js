@@ -57,26 +57,10 @@ export async function loadState() {
       }
     } catch (err) {
       console.warn('Could not read cloud project state:', err);
+      window.dispatchEvent(new CustomEvent('app-toast', { detail: { type: 'error', title: 'Cloud Load Failed', desc: err.message || 'Check Firestore security rules.' } }));
     }
   }
 
-  // 2. Desktop Electron disk state fallback
-  if (window.electronAPI?.readState) {
-    try {
-      const stored = await window.electronAPI.readState();
-      if (stored) {
-        return {
-          ...DEFAULT_STATE,
-          ...stored,
-          reconstructed: { ...DEFAULT_STATE.reconstructed, ...(stored.reconstructed || {}) },
-          inservice: { ...DEFAULT_STATE.inservice, ...(stored.inservice || {}) },
-          trafficAnalysis: stored.trafficAnalysis || {}
-        };
-      }
-    } catch (err) {
-      console.warn('Could not read local disk state:', err);
-    }
-  }
 
   // 3. Web Browser LocalStorage fallback
   try {
@@ -110,19 +94,16 @@ export async function saveState(state) {
     console.warn('Failed saving state to LocalStorage:', err);
   }
 
-  // 2. Save to local disk for desktop offline resilience
-  if (window.electronAPI?.writeState) {
-    try {
-      await window.electronAPI.writeState(state);
-    } catch (err) {
-      console.warn('Failed writing to local disk state:', err);
-    }
-  }
 
   // 3. Sync to active Cloud Project if logged in & active project is set
   const activeProjectId = getActiveProjectId();
   if (activeProjectId) {
-    await saveProjectStateToCloud(activeProjectId, state);
+    try {
+      await saveProjectStateToCloud(activeProjectId, state);
+      window.dispatchEvent(new CustomEvent('app-toast', { detail: { type: 'success', title: 'Cloud Sync', desc: 'Data saved to cloud project successfully.', duration: 2000 } }));
+    } catch (err) {
+      window.dispatchEvent(new CustomEvent('app-toast', { detail: { type: 'error', title: 'Cloud Sync Failed', desc: err.message || 'Could not save state to cloud.' } }));
+    }
   }
 }
 
