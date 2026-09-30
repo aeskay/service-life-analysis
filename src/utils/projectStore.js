@@ -14,6 +14,7 @@ import { db } from '../config/firebase';
 
 const PROJECTS_COLLECTION = 'projects';
 const ACTIVE_PROJECT_KEY = 'crcp_active_project_id';
+const CHUNK_SIZE = 40; // 40 items per doc ensures safe payload < 100KB (limit is 1000KB)
 
 /**
  * Get the currently stored active project ID from localStorage (only stores active ID string)
@@ -83,6 +84,7 @@ export async function createProject(uid, name, description = '') {
     pmisAvailableYears: [],
     verifiedSNs: [],
     actualEndOfLifeMap: {},
+    actualYearConstMap: {},
     lastUpdated: nowIso,
   };
 
@@ -95,15 +97,182 @@ export async function createProject(uid, name, description = '') {
     pmisAvailableYears: [],
     verifiedSNs: [],
     actualEndOfLifeMap: {},
+    actualYearConstMap: {},
     lastUpdated: nowIso,
   };
 
-  // Store modules as subdocuments under projects/{projectId}/modules/{moduleName}
-  await setDoc(doc(db, PROJECTS_COLLECTION, projectRef.id, 'modules', 'reconstructed'), initialReconstructed);
-  await setDoc(doc(db, PROJECTS_COLLECTION, projectRef.id, 'modules', 'inservice'), initialInservice);
+  await saveModuleStateToCloud(projectRef.id, 'reconstructed', initialReconstructed);
+  await saveModuleStateToCloud(projectRef.id, 'inservice', initialInservice);
   await setDoc(doc(db, PROJECTS_COLLECTION, projectRef.id, 'modules', 'traffic'), {});
 
   return { id: projectRef.id, ...newProject };
+}
+
+async function saveArrayChunks(projectId, moduleName, arrayName, dataArray) {
+  if (!dataArray || !Array.isArray(dataArray) || dataArray.length === 0) return 0;
+  
+  const chunksCount = Math.ceil(dataArray.length / CHUNK_SIZE);
+  const promises = [];
+
+  for (let i = 0; i < chunksCount; i++) {
+    const chunk = dataArray.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    const chunkRef = doc(db, PROJECTS_COLLECTION, projectId, `${moduleName}_data`, `${arrayName}_chunk_${i}`);
+    promises.push(setDoc(chunkRef, { items: chunk }));
+  }
+
+  await Promise.all(promises);
+  return chunksCount;
+}
+
+async function loadArrayChunks(projectId, moduleName, arrayName, chunksCount) {
+  if (!chunksCount || chunksCount <= 0) return [];
+  
+  const promises = [];
+  for (let i = 0; i < chunksCount; i++) {
+    const chunkRef = doc(db, PROJECTS_COLLECTION, projectId, `${moduleName}_data`, `${arrayName}_chunk_${i}`);
+    promises.push(getDoc(chunkRef));
+  }
+
+  const snapshots = await Promise.all(promises);
+  let combined = [];
+  for (const snap of snapshots) {
+    if (snap.exists() && snap.data()?.items) {
+      combined = combined.concat(snap.data().items);
+    }
+  }
+  return combined;
+}
+
+async function cleanupOldChunks(projectId, moduleName, arrayName, oldNum, newNum) {
+  if (oldNum > newNum) {
+    const deletePromises = [];
+    for (let i = newNum; i < oldNum; i++) {
+      const chunkRef = doc(db, PROJECTS_COLLECTION, projectId, `${moduleName}_data`, `${arrayName}_chunk_${i}`);
+      deletePromises.push(deleteDoc(chunkRef));
+    }
+    await Promise.all(deletePromises);
+  }
+}
+
+export async function saveModuleStateToCloud(projectId, moduleName, moduleData) {
+  if (!projectId || !moduleData) return;
+
+  const { rows = [], errors = [], pmisRows = [], ...meta } = moduleData;
+
+  const manifestRef = doc(db, PROJECTS_COLLECTION, projectId, `${moduleName}_data`, '_manifest');
+  const manifestSnap = await getDoc(manifestRef);
+  const oldManifest = manifestSnap.exists() ? manifestSnap.data() : {};
+
+  const rowsChunksCount = await saveArrayChunks(projectId, moduleName, 'rows', rows);
+  const errorsChunksCount = await saveArrayChunks(projectId, moduleName, 'errors', errors);
+  const pmisChunksCount = await saveArrayChunks(projectId, moduleName, 'pmisRows', pmisRows);
+
+  await cleanupOldChunks(projectId, moduleName, 'rows', oldManifest.rowsChunksCount || 0, rowsChunksCount);
+  await cleanupOldChunks(projectId, moduleName, 'errors', oldManifest.errorsChunksCount || 0, errorsChunksCount);
+  await cleanupOldChunks(projectId, moduleName, 'pmisRows', oldManifest.pmisChunksCount || 0, pmisChunksCount);
+
+  await setDoc(manifestRef, {
+    rowsChunksCount,
+    errorsChunksCount,
+    pmisChunksCount,
+    updatedAt: serverTimestamp(),
+  });
+
+  const metaRef = doc(db, PROJECTS_COLLECTION, projectId, 'modules', moduleName);
+  await setDoc(metaRef, {
+    ...meta,
+    rowCount: rows.length,
+    pmisRowCount: pmisRows.length,
+    errorCount: errors.length,
+    lastUpdated: new Date().toISOString(),
+  });
+}
+
+export async function loadModuleStateFromCloud(projectId, moduleName) {
+  const metaRef = doc(db, PROJECTS_COLLECTION, projectId, 'modules', moduleName);
+  const metaSnap = await getDoc(metaRef);
+
+  const meta = metaSnap.exists() ? metaSnap.data() : {};
+
+  const manifestRef = doc(db, PROJECTS_COLLECTION, projectId, `${moduleName}_data`, '_manifest');
+  const manifestSnap = await getDoc(manifestRef);
+  const manifest = manifestSnap.exists() ? manifestSnap.data() : {};
+
+  const [rows, errors, pmisRows] = await Promise.all([
+    loadArrayChunks(projectId, moduleName, 'rows', manifest.rowsChunksCount || 0),
+    loadArrayChunks(projectId, moduleName, 'errors', manifest.errorsChunksCount || 0),
+    loadArrayChunks(projectId, moduleName, 'pmisRows', manifest.pmisChunksCount || 0),
+  ]);
+
+  return {
+    ...meta,
+    rows: rows.length > 0 ? rows : (meta.rows || []),
+    errors: errors.length > 0 ? errors : (meta.errors || []),
+    pmisRows: pmisRows.length > 0 ? pmisRows : (meta.pmisRows || []),
+  };
+}
+
+export async function saveTrafficStateToCloud(projectId, trafficData) {
+  if (!projectId || !trafficData) return;
+
+  const reconRes = trafficData.reconstructed?.results || [];
+  const insvcRes = trafficData.inservice?.results || [];
+
+  const manifestRef = doc(db, PROJECTS_COLLECTION, projectId, 'traffic_data', '_manifest');
+  const manifestSnap = await getDoc(manifestRef);
+  const oldManifest = manifestSnap.exists() ? manifestSnap.data() : {};
+
+  const reconChunksCount = await saveArrayChunks(projectId, 'traffic', 'recon_results', reconRes);
+  const insvcChunksCount = await saveArrayChunks(projectId, 'traffic', 'insvc_results', insvcRes);
+
+  await cleanupOldChunks(projectId, 'traffic', 'recon_results', oldManifest.reconChunksCount || 0, reconChunksCount);
+  await cleanupOldChunks(projectId, 'traffic', 'insvc_results', oldManifest.insvcChunksCount || 0, insvcChunksCount);
+
+  await setDoc(manifestRef, {
+    reconChunksCount,
+    insvcChunksCount,
+    updatedAt: serverTimestamp(),
+  });
+
+  const { reconstructed, inservice, ...trafficMeta } = trafficData;
+  const reconClean = { ...reconstructed, results: [] };
+  const insvcClean = { ...inservice, results: [] };
+
+  const metaRef = doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic');
+  await setDoc(metaRef, {
+    ...trafficMeta,
+    reconstructedMeta: reconClean,
+    inserviceMeta: insvcClean,
+    lastUpdated: new Date().toISOString(),
+  });
+}
+
+export async function loadTrafficStateFromCloud(projectId) {
+  const metaRef = doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic');
+  const metaSnap = await getDoc(metaRef);
+
+  const meta = metaSnap.exists() ? metaSnap.data() : {};
+
+  const manifestRef = doc(db, PROJECTS_COLLECTION, projectId, 'traffic_data', '_manifest');
+  const manifestSnap = await getDoc(manifestRef);
+  const manifest = manifestSnap.exists() ? manifestSnap.data() : {};
+
+  const [reconResults, insvcResults] = await Promise.all([
+    loadArrayChunks(projectId, 'traffic', 'recon_results', manifest.reconChunksCount || 0),
+    loadArrayChunks(projectId, 'traffic', 'insvc_results', manifest.insvcChunksCount || 0),
+  ]);
+
+  return {
+    ...meta,
+    reconstructed: {
+      ...(meta.reconstructedMeta || {}),
+      results: reconResults,
+    },
+    inservice: {
+      ...(meta.inserviceMeta || {}),
+      results: insvcResults,
+    }
+  };
 }
 
 /**
@@ -115,17 +284,19 @@ export async function loadProjectStateFromCloud(projectId) {
   const projectDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId));
   if (!projectDoc.exists()) return null;
 
-  const reconDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'reconstructed'));
-  const inserviceDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'inservice'));
-  const trafficDoc = await getDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic'));
+  const [reconstructed, inservice, trafficAnalysis] = await Promise.all([
+    loadModuleStateFromCloud(projectId, 'reconstructed'),
+    loadModuleStateFromCloud(projectId, 'inservice'),
+    loadTrafficStateFromCloud(projectId),
+  ]);
 
   return {
     metadata: { id: projectDoc.id, ...projectDoc.data() },
     state: {
       version: 1,
-      reconstructed: reconDoc.exists() ? reconDoc.data() : {},
-      inservice: inserviceDoc.exists() ? inserviceDoc.data() : {},
-      trafficAnalysis: trafficDoc.exists() ? trafficDoc.data() : {}
+      reconstructed,
+      inservice,
+      trafficAnalysis,
     }
   };
 }
@@ -136,22 +307,22 @@ export async function loadProjectStateFromCloud(projectId) {
 export async function saveProjectStateToCloud(projectId, state) {
   if (!projectId || !state) return;
 
-  const batchUpdates = [];
+  const promises = [];
   if (state.reconstructed) {
-    batchUpdates.push(setDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'reconstructed'), state.reconstructed, { merge: true }));
+    promises.push(saveModuleStateToCloud(projectId, 'reconstructed', state.reconstructed));
   }
   if (state.inservice) {
-    batchUpdates.push(setDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'inservice'), state.inservice, { merge: true }));
+    promises.push(saveModuleStateToCloud(projectId, 'inservice', state.inservice));
   }
   if (state.trafficAnalysis) {
-    batchUpdates.push(setDoc(doc(db, PROJECTS_COLLECTION, projectId, 'modules', 'traffic'), state.trafficAnalysis, { merge: true }));
+    promises.push(saveTrafficStateToCloud(projectId, state.trafficAnalysis));
   }
 
-  batchUpdates.push(updateDoc(doc(db, PROJECTS_COLLECTION, projectId), {
+  promises.push(updateDoc(doc(db, PROJECTS_COLLECTION, projectId), {
     updatedAt: serverTimestamp()
   }));
 
-  await Promise.all(batchUpdates);
+  await Promise.all(promises);
 }
 
 /**

@@ -43,10 +43,14 @@ import AuthModal from './components/Auth/AuthModal';
 import ProjectModal from './components/Projects/ProjectModal';
 import { AuthProvider } from './context/AuthContext';
 import { useToast } from './hooks/useToast';
+import { useAuth } from './context/AuthContext';
 import { loadUIPrefs, saveUIPrefs } from './utils/uiPreferences';
-import { getActiveProjectId } from './utils/projectStore';
+import { getActiveProjectId, setActiveProjectId, getUserProjects, createProject } from './utils/projectStore';
 
 function AppContent() {
+  const authContext = useAuth() || {};
+  const currentUser = authContext.currentUser || null;
+
   const [paths, setPaths] = useState(null);
   const [errorCount, setErrorCount] = useState(0);
   const [uiPrefsReady, setPrefsReady] = useState(false);
@@ -59,6 +63,46 @@ function AppContent() {
   const [projectKey, setProjectKey] = useState(0); // Key used to force remount/reload workspaces when project changes
 
   const { toasts, addToast, removeToast } = useToast();
+
+  // ─── Auto Sync User Active Project on Auth Login ───────────────────────────
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let isMounted = true;
+    async function syncActiveProject() {
+      try {
+        const projects = await getUserProjects(currentUser.uid);
+        const currentActiveId = getActiveProjectId();
+
+        if (projects.length > 0) {
+          const activeFound = projects.find(p => p.id === currentActiveId);
+          if (!activeFound || !currentActiveId) {
+            const mostRecent = projects[0];
+            setActiveProjectId(mostRecent.id);
+            if (isMounted) {
+              setActiveProjectIdState(mostRecent.id);
+              setProjectKey(k => k + 1);
+              addToast('info', 'Cloud Project Loaded', `Loaded active project: "${mostRecent.name}"`);
+            }
+          }
+        } else {
+          // Create initial cloud project automatically for new user
+          const defaultProj = await createProject(currentUser.uid, 'Default Pavement Project', 'Automated cloud workspace');
+          setActiveProjectId(defaultProj.id);
+          if (isMounted) {
+            setActiveProjectIdState(defaultProj.id);
+            setProjectKey(k => k + 1);
+            addToast('success', 'Project Initialized', `Created and opened online cloud project: "${defaultProj.name}"`);
+          }
+        }
+      } catch (err) {
+        console.warn('Error syncing active cloud project:', err);
+      }
+    }
+
+    syncActiveProject();
+    return () => { isMounted = false; };
+  }, [currentUser, addToast]);
 
   // ─── Load everything from disk on first mount ──────────────────────────────
   useEffect(() => {
